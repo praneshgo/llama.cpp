@@ -1894,7 +1894,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     }
 
 #if defined(__linux__)
-    if (ml.use_direct_io && per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
+    if (ml.use_direct_io && params.ple_direct_io && per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
         const auto * weight = ml.get_weight(ggml_get_name(per_layer_tok_embd));
         GGML_ASSERT(weight);
         if (ml.files[weight->idx]->has_direct_io()) {
@@ -2933,6 +2933,7 @@ llama_model_params llama_model_default_params() {
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
         /*.load_mtp                    =*/ false,
+        /*.ple_direct_io               =*/ true,
     };
 
     return result;

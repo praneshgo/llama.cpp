@@ -348,6 +348,7 @@ extern "C" {
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
+        bool ple_direct_io;   // use direct I/O for lazy PLE rows when load_mode is direct I/O
     };
 
     struct llama_sampler_seq_config {

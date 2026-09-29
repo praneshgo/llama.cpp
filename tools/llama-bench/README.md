@@ -68,6 +68,7 @@ test parameters:
   -fa, --flash-attn <on|off|auto>           (default: auto)
   -dev, --device <dev0/dev1/...>            (default: auto)
   -lzm, --lazy-mode <on|auto|off>           (default: auto)
+  --ple-direct-io <0|1>                     (default: 1; use with --load-mode dio --lazy-mode on)
   -mmp, --mmap <0|1>                        (DEPRECATED IN FAVOUR OF --load-mode)
   -dio, --direct-io <0|1>                   (DEPRECATED IN FAVOUR OF --load-mode)
   -embd, --embeddings <0|1>                 (default: 0)
