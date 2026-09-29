@@ -1042,7 +1042,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, co
 class llm_graph_input_ple : public llm_graph_input_i {
 public:
     llm_graph_input_ple(const llama_model_qwen4exp & pmodel,
-                        const llama_kv_cache_context * mctx) : pmodel(pmodel), mctx(mctx) {}
+                        const llama_kv_cache_context * mctx) : pmodel(pmodel), lazy(pmodel, pmodel.per_layer_tok_embd), mctx(mctx) {}
     virtual ~llm_graph_input_ple() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
@@ -1055,6 +1055,7 @@ public:
     ggml_tensor * rows = nullptr;   // I32 [ple_n_heads * n_tokens]
 
     const llama_model_qwen4exp & pmodel;
+    llm_graph_lazy_rows lazy;
 
     // the predecessor tokens live in the attention KV cells (ext.tok)
     const llama_kv_cache_context * mctx;
@@ -1123,9 +1124,10 @@ void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
         }
     }
 
-    llama_prefetch_rows(pmodel.per_layer_tok_embd, idx.data(), idx.size());
-
-    ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
+    lazy.set_rows(idx.data(), idx.size());
+    if (!lazy.is_direct()) {
+        ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
+    }
 }
 
 // Read a conv history out of its own recurrent row and write the new tail back.
@@ -1193,12 +1195,14 @@ ggml_tensor * llama_model_qwen4exp::graph::build_inp_ple(
             static_cast<const llama_model_qwen4exp &>(model), mctx_hyb->get_attn());
 
     ple_inp->rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
-    ggml_set_input(ple_inp->rows);
+    if (!ple_inp->lazy.is_direct()) {
+        ggml_set_input(ple_inp->rows);
+    }
     ggml_tensor * rows = ple_inp->rows;
-    res->add_input(std::move(ple_inp));
 
     // gather then flatten the heads: get_rows lays the head dimension out slowest, as the reference does
-    ggml_tensor * emb = ggml_get_rows(ctx0, model.per_layer_tok_embd, rows);
+    ggml_tensor * emb = ple_inp->lazy.build(ctx0, rows);
+    res->add_input(std::move(ple_inp));
     emb = ggml_reshape_2d(ctx0, emb, hparams.ple_head_dim * n_heads, n_tokens);
     cb(emb, "ple_embd", -1);
 

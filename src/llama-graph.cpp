@@ -24,6 +24,36 @@
 #include <string>
 #include <unordered_set>
 
+llm_graph_lazy_rows::llm_graph_lazy_rows(const llama_model & model, ggml_tensor * table) :
+        model(model), table(table), direct(model.has_direct_ple_rows(table)) {}
+
+ggml_tensor * llm_graph_lazy_rows::build(ggml_context * ctx, ggml_tensor * rows) {
+    if (!direct) {
+        return ggml_get_rows(ctx, table, rows);
+    }
+
+    staged = ggml_new_tensor_2d(ctx, table->type, table->ne[0], rows->ne[0]);
+    staged_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, rows->ne[0]);
+    ggml_set_input(staged);
+    ggml_set_input(staged_rows);
+    return ggml_get_rows(ctx, staged, staged_rows);
+}
+
+void llm_graph_lazy_rows::set_rows(const int32_t * rows, size_t n_rows) const {
+    if (!direct) {
+        llama_prefetch_rows(table, rows, n_rows);
+        return;
+    }
+
+    const size_t row_bytes = ggml_row_size(table->type, table->ne[0]);
+    std::vector<uint8_t> data(n_rows * row_bytes);
+    std::vector<int32_t> indices(n_rows);
+    std::iota(indices.begin(), indices.end(), 0);
+    model.read_direct_ple_rows(table, rows, n_rows, data.data());
+    ggml_backend_tensor_set(staged, data.data(), 0, data.size());
+    ggml_backend_tensor_set(staged_rows, indices.data(), 0, indices.size() * sizeof(int32_t));
+}
+
 // dedup helpers
 
 static ggml_tensor * build_attn_inp_kq_mask(

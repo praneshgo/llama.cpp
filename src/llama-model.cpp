@@ -26,19 +26,28 @@
 #include "ggml-cpp.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <cfloat>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <functional>
+#include <future>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
     switch (arch) {
@@ -1183,6 +1192,11 @@ struct llama_model::impl {
     // model memory mapped files
     llama_mmaps mappings;
 
+    const ggml_tensor * direct_ple_tensor = nullptr;
+    size_t direct_ple_offset = 0;
+    std::unique_ptr<llama_file> direct_ple_file;
+    std::atomic<bool> direct_ple_failed { false };
+
     // objects representing data potentially being locked in memory
     llama_mlocks mlock_bufs;
     llama_mlocks mlock_mmaps;
@@ -1879,6 +1893,19 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
+#if defined(__linux__)
+    if (ml.use_direct_io && per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
+        const auto * weight = ml.get_weight(ggml_get_name(per_layer_tok_embd));
+        GGML_ASSERT(weight);
+        if (ml.files[weight->idx]->has_direct_io()) {
+            pimpl->direct_ple_tensor = per_layer_tok_embd;
+            pimpl->direct_ple_offset = weight->offs;
+            pimpl->direct_ple_file = std::move(ml.files[weight->idx]);
+            LLAMA_LOG_INFO("%s: direct I/O PLE rows enabled\n", __func__);
+        }
+    }
+#endif
+
     return true;
 }
 
@@ -2246,6 +2273,109 @@ const ggml_tensor * llama_model::get_tensor(const char * name) const {
     }
 
     return it->second;
+}
+
+bool llama_model::has_direct_ple_rows(const ggml_tensor * tensor) const {
+    return tensor == pimpl->direct_ple_tensor && pimpl->direct_ple_file != nullptr;
+}
+
+void llama_model::read_direct_ple_rows(const ggml_tensor * tensor, const int32_t * rows, size_t n_rows, void * dst) const {
+#if defined(__linux__)
+    GGML_ASSERT(has_direct_ple_rows(tensor));
+    if (n_rows == 0) {
+        return;
+    }
+
+    const llama_file & file = *pimpl->direct_ple_file;
+    const size_t alignment = file.read_alignment();
+    const size_t row_bytes = ggml_row_size(tensor->type, tensor->ne[0]);
+    auto * output = static_cast<uint8_t *>(dst);
+
+    std::vector<size_t> order(n_rows);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [rows](size_t a, size_t b) { return rows[a] < rows[b]; });
+
+    auto read_mapped = [&]() {
+        for (size_t i = 0; i < n_rows; ++i) {
+            GGML_ASSERT(rows[i] >= 0 && rows[i] < tensor->ne[1]);
+            std::memcpy(output + i * row_bytes, static_cast<const uint8_t *>(tensor->data) + (size_t) rows[i] * tensor->nb[1], row_bytes);
+        }
+    };
+
+    if (pimpl->direct_ple_failed || alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0) {
+        read_mapped();
+        return;
+    }
+
+    auto read_range = [&](size_t begin, size_t end) {
+        const size_t buffer_size = ((row_bytes + alignment - 1) / alignment + 1) * alignment;
+        void * raw_buffer = nullptr;
+        const int alloc_result = posix_memalign(&raw_buffer, alignment, buffer_size);
+        if (alloc_result != 0) {
+            throw std::runtime_error(format("PLE direct I/O buffer allocation failed: %s", strerror(alloc_result)));
+        }
+        std::unique_ptr<void, decltype(&std::free)> buffer(raw_buffer, std::free);
+
+        size_t cached_first = SIZE_MAX;
+        size_t cached_size = 0;
+        for (size_t k = begin; k < end; ++k) {
+            const size_t i = order[k];
+            GGML_ASSERT(rows[i] >= 0 && rows[i] < tensor->ne[1]);
+            const size_t offset = pimpl->direct_ple_offset + (size_t) rows[i] * tensor->nb[1];
+            const size_t first = offset & ~(alignment - 1);
+            const size_t size = (offset - first + row_bytes + alignment - 1) & ~(alignment - 1);
+
+            if (first != cached_first || size != cached_size) {
+                ssize_t n_read;
+                do {
+                    n_read = pread(file.file_id(), buffer.get(), size, (off_t) first);
+                } while (n_read < 0 && errno == EINTR);
+
+                if (n_read < 0 && (errno == EINVAL || errno == EOPNOTSUPP)) {
+                    return false;
+                }
+                if (n_read < 0) {
+                    throw std::runtime_error(format("PLE direct I/O read failed: %s", strerror(errno)));
+                }
+                if ((size_t) n_read < std::min(size, file.size() - first) || (size_t) n_read < offset - first + row_bytes) {
+                    throw std::runtime_error("PLE direct I/O read reached the end of the file");
+                }
+                cached_first = first;
+                cached_size = size;
+            }
+            std::memcpy(output + i * row_bytes, static_cast<const uint8_t *>(buffer.get()) + offset - first, row_bytes);
+        }
+        return true;
+    };
+
+    const size_t n_workers = std::min<size_t>(16, (n_rows + 127) / 128);
+    bool direct_ok = true;
+    if (n_workers == 1) {
+        direct_ok = read_range(0, n_rows);
+    } else {
+        std::vector<std::future<bool>> tasks;
+        tasks.reserve(n_workers);
+        for (size_t worker = 0; worker < n_workers; ++worker) {
+            const size_t begin = worker * n_rows / n_workers;
+            const size_t end = (worker + 1) * n_rows / n_workers;
+            tasks.emplace_back(std::async(std::launch::async, read_range, begin, end));
+        }
+        for (auto & task : tasks) {
+            direct_ok = task.get() && direct_ok;
+        }
+    }
+    if (!direct_ok) {
+        pimpl->direct_ple_failed = true;
+        static std::once_flag warning_once;
+        std::call_once(warning_once, [] { LLAMA_LOG_WARN("PLE direct I/O read failed; using mmap for PLE rows\n"); });
+        read_mapped();
+    }
+#else
+    GGML_UNUSED(tensor);
+    GGML_UNUSED(rows);
+    GGML_UNUSED(n_rows);
+    GGML_UNUSED(dst);
+#endif
 }
 
 float llama_model::get_rope_freq_base (const llama_cparams & cparams, int il) const {

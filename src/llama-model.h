@@ -752,6 +752,9 @@ struct llama_model {
 
     const struct ggml_tensor * get_tensor(const char * name) const;
 
+    bool has_direct_ple_rows(const ggml_tensor * tensor) const;
+    void read_direct_ple_rows(const ggml_tensor * tensor, const int32_t * rows, size_t n_rows, void * dst) const;
+
     float get_rope_freq_base (const llama_cparams & cparams, int il) const;
     float get_rope_freq_scale(const llama_cparams & cparams, int il) const;
 

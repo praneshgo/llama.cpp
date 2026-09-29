@@ -16,6 +16,7 @@
 struct ggml_cgraph;
 struct ggml_context;
 struct ggml_tensor;
+struct llama_model;
 
 struct llama_cparams;
 struct llama_layer;
@@ -120,6 +121,22 @@ public:
 protected:
     // env: LLAMA_GRAPH_INPUT_DEBUG
     int debug = 0;
+};
+
+class llm_graph_lazy_rows {
+public:
+    llm_graph_lazy_rows(const llama_model & model, ggml_tensor * table);
+
+    ggml_tensor * build(ggml_context * ctx, ggml_tensor * rows);
+    void set_rows(const int32_t * rows, size_t n_rows) const;
+    bool is_direct() const { return direct; }
+
+private:
+    const llama_model & model;
+    ggml_tensor * table;
+    ggml_tensor * staged = nullptr;
+    ggml_tensor * staged_rows = nullptr;
+    bool direct;
 };
 
 using llm_graph_input_ptr = std::unique_ptr<llm_graph_input_i>;
