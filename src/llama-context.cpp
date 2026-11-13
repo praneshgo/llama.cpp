@@ -3195,6 +3195,11 @@ void llama_context::vsub_init(const llama_token * list, size_t n_list) {
         // the rows are copied as they are stored, so skip repacked and split weights
         ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(w->buffer);
         ggml_backend_dev_t         dev  = ggml_backend_buft_get_device(buft);
+        // an mmap-backed device buffer holds the rows as stored: copy them into the device's own buffer type
+        if (dev != nullptr && !ggml_backend_buft_is_host(buft) && ggml_backend_dev_buffer_type(dev) != buft &&
+                strstr(ggml_backend_buft_name(buft), "_Mapped") != nullptr) {
+            buft = ggml_backend_dev_buffer_type(dev);
+        }
         if (!ggml_backend_buft_is_host(buft) && (dev == nullptr || ggml_backend_dev_buffer_type(dev) != buft)) {
             LLAMA_LOG_WARN("%s: vocab_subset: %s is in buffer type %s, not supported\n", __func__, w->name, ggml_backend_buft_name(buft));
             continue;
