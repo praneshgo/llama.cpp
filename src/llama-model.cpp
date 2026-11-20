@@ -1382,6 +1382,9 @@ struct llama_model::impl {
     // contexts where the model tensors metadata is stored as well as the corresponding buffers:
     std::vector<std::pair<ggml_context_ptr, std::vector<ggml_backend_buffer_ptr>>> ctxs_bufs;
 
+    // the buffers that wrap the mmap'd file through buffer_from_host_ptr
+    std::unordered_set<ggml_backend_buffer_t> host_ptr_bufs;
+
     buft_list_t cpu_buft_list;
     std::map<ggml_backend_dev_t, buft_list_t> gpu_buft_list;
 
@@ -2092,6 +2095,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                     if (buf == nullptr) {
                         throw std::runtime_error(format("unable to allocate %s buffer", ggml_backend_buft_name(buft)));
                     }
+                    pimpl->host_ptr_bufs.insert(buf);
                     bufs.emplace_back(buf);
                 }
             }
@@ -2892,6 +2896,10 @@ ggml_backend_buffer_type_t llama_model::select_buft(int il) const {
                 ggml_tensor * layer_dir = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hparams.n_embd);
                 return ggml_add(ctx, cur, layer_dir);
             });
+}
+
+bool llama_model::is_host_ptr_buffer(ggml_backend_buffer_t buf) const {
+    return pimpl->host_ptr_bufs.count(buf) > 0;
 }
 
 bool llama_model::has_tensor_overrides() const {

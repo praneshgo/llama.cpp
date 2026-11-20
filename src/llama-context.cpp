@@ -3186,17 +3186,18 @@ void llama_context::vsub_init(const llama_token * list, size_t n_list) {
     }
 
     // the model's head, the MTP heads, and the target's head for drafters without one
-    std::vector<ggml_tensor *> cands = { model.output };
+    std::vector<std::pair<ggml_tensor *, const llama_model *>> cands = { { model.output, &model } };
     for (const auto & layer : model.layers) {
-        cands.push_back(layer.nextn.shared_head_head);
+        cands.emplace_back(layer.nextn.shared_head_head, &model);
     }
     if (model.output == nullptr && cparams.ctx_other != nullptr) {
-        cands.push_back(llama_get_model(cparams.ctx_other)->output);
+        const llama_model * other = llama_get_model(cparams.ctx_other);
+        cands.emplace_back(other->output, other);
     }
 
     vsub = std::make_unique<llama_vocab_subset>();
 
-    for (ggml_tensor * w : cands) {
+    for (const auto & [w, owner] : cands) {
         if (w == nullptr || vsub->heads.count(w) || ggml_n_dims(w) != 2 || w->ne[1] != n_vocab || !ggml_is_contiguous(w) || w->buffer == nullptr) {
             continue;
         }
@@ -3204,6 +3205,10 @@ void llama_context::vsub_init(const llama_token * list, size_t n_list) {
         // the rows are copied as they are stored, so skip repacked and split weights
         ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(w->buffer);
         ggml_backend_dev_t         dev  = ggml_backend_buft_get_device(buft);
+        // an mmap-backed device buffer holds the rows as stored: copy them into the device's own buffer type
+        if (dev != nullptr && !ggml_backend_buft_is_host(buft) && owner->is_host_ptr_buffer(w->buffer)) {
+            buft = ggml_backend_dev_buffer_type(dev);
+        }
         if (!ggml_backend_buft_is_host(buft) && (dev == nullptr || ggml_backend_dev_buffer_type(dev) != buft)) {
             LLAMA_LOG_WARN("%s: vocab_subset: %s is in buffer type %s, not supported\n", __func__, w->name, ggml_backend_buft_name(buft));
             continue;

@@ -1035,6 +1035,9 @@ struct llama_model {
 
     ggml_backend_buffer_type_t select_buft(int il) const;
 
+    // true if buf wraps the mmap'd file, so its tensors hold the rows as stored
+    bool is_host_ptr_buffer(ggml_backend_buffer_t buf) const;
+
     bool has_tensor_overrides() const;
 
     const struct ggml_tensor * get_tensor(const char * name) const;
